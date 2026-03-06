@@ -1,0 +1,10 @@
+node_modules/
+temp/
+env/
+.env
+*.mp4
+*.webm
+*.part
+.pm2/
+logs/
+package-lock.json
