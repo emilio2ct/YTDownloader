@@ -26,21 +26,22 @@ app.use('/api/', limiter);
 const concurrencyLimit = pLimit(3);
 
 app.use(cors());
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Security: Basic Content Security Policy (CSP)
+// Security & Cache Control - MUST be above static middleware to affect static files
 app.use((req, res, next) => {
-    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; img-src 'self' data:; connect-src 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; img-src 'self' data:; connect-src 'self'");
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     next();
 });
+
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Helper: get video title using yt-dlp with timeout
 function getVideoTitle(url) {
     return new Promise((resolve, reject) => {
         // Enforce the URL as a positional argument using '--'
-        const proc = spawn('python', ['-m', 'yt_dlp', '--get-title', '--no-playlist', '--', url]);
+        const proc = spawn('python', ['-m', 'yt_dlp', '--get-title', '--no-playlist', '--', url], { windowsHide: true });
         let title = '';
         const timeout = setTimeout(() => {
             proc.kill();
@@ -59,31 +60,44 @@ function getVideoTitle(url) {
     });
 }
 
-// Helper: download video to a temp file using yt-dlp + ffmpeg merge
-function downloadToTemp(url, outputPath) {
+// Helper: download video/audio to a temp file using yt-dlp
+function downloadToTemp(url, outputPathPattern, format = 'mp4', quality = '720') {
     return new Promise((resolve, reject) => {
-        // Enforce the URL as a positional argument using '--'
-        const ytDlp = spawn('python', [
+        const args = [
             '-m', 'yt_dlp',
             '--no-playlist',
-            '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
-            '--merge-output-format', 'mp4',
             '--ffmpeg-location', FFMPEG_PATH,
-            '--output', outputPath,
+            '--output', outputPathPattern,
             '--', url
-        ]);
+        ];
 
+        if (format === 'mp3') {
+            args.splice(3, 0,
+                '--extract-audio',
+                '--audio-format', 'mp3',
+                '--audio-quality', `${quality}K`
+            );
+        } else {
+            const height = quality === '1080' ? '1080' : '720';
+            args.splice(3, 0,
+                '--format', `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}][ext=mp4]/best`,
+                '--merge-output-format', 'mp4'
+            );
+        }
+
+        const ytDlp = spawn('python', args, { windowsHide: true });
         ytDlp.on('close', (code) => {
             if (code === 0) resolve();
             else reject(new Error(`yt-dlp exited with code ${code}`));
         });
-
         ytDlp.on('error', reject);
     });
 }
 
 app.get('/api/download', async (req, res) => {
     const videoURL = req.query.url;
+    const format = req.query.format || 'mp4';
+    const quality = req.query.quality || (format === 'mp3' ? '192' : '720');
 
     if (!videoURL) {
         return res.status(400).send('Please provide a YouTube URL.');
@@ -97,7 +111,7 @@ app.get('/api/download', async (req, res) => {
 
     const tmpId = randomUUID();
     const tmpBase = `yt-${tmpId}`;
-    const tmpPathTemplate = path.join(os.tmpdir(), `${tmpBase}.mp4`);
+    const tmpPathTemplate = path.join(os.tmpdir(), `${tmpBase}.%(ext)s`);
 
     try {
         console.log(`\n[+] Download requested (Rate/Limit applied): ${videoURL}`);
@@ -107,9 +121,8 @@ app.get('/api/download', async (req, res) => {
             // 1. Get title
             const title = await getVideoTitle(videoURL);
 
-            // 2. Download + merge to temp file
-            console.log(`[+] Rendering to: ${tmpPathTemplate}`);
-            await downloadToTemp(videoURL, tmpPathTemplate);
+            // 2. Download
+            await downloadToTemp(videoURL, tmpPathTemplate, format, quality);
 
             // 3. Resolve actual file
             const tmpDir = os.tmpdir();
@@ -121,10 +134,11 @@ app.get('/api/download', async (req, res) => {
 
             const tmpPath = path.join(tmpDir, matchedFile);
             const fileStat = fs.statSync(tmpPath);
+            const ext = path.extname(matchedFile);
 
             // 4. Send as attachment
-            res.header('Content-Disposition', `attachment; filename="${title}.mp4"`);
-            res.header('Content-Type', 'video/mp4');
+            res.header('Content-Disposition', `attachment; filename="${title}${ext}"`);
+            res.header('Content-Type', format === 'mp3' ? 'audio/mpeg' : 'video/mp4');
             res.header('Content-Length', fileStat.size);
 
             const readStream = fs.createReadStream(tmpPath);

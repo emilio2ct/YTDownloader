@@ -1,65 +1,110 @@
-document.addEventListener('DOMContentLoaded', () => {
-    const form = document.getElementById('download-form');
-    const urlInput = document.getElementById('video-url');
-    const downloadBtn = document.getElementById('download-btn');
-    const statusMessage = document.getElementById('status-message');
+const downloadBtn = document.getElementById('downloadBtn');
+const videoUrlInput = document.getElementById('videoUrl');
+const statusMsg = document.getElementById('status');
+const formatToggle = document.getElementById('formatToggle');
+const qualityChips = document.getElementById('qualityChips');
+const qualityLabel = document.getElementById('qualityLabel');
+const spinner = document.getElementById('spinner');
+const btnText = document.getElementById('btnText');
 
-    form.addEventListener('submit', (e) => {
-        e.preventDefault();
+let selectedFormat = 'mp4';
+let selectedQuality = '720';
 
-        const url = urlInput.value.trim();
+const qualities = {
+    mp4: [
+        { label: '720p', value: '720' },
+        { label: '1080p', value: '1080' }
+    ],
+    mp3: [
+        { label: '128kbps', value: '128' },
+        { label: '192kbps', value: '192' },
+        { label: '256kbps', value: '256' }
+    ]
+};
 
-        if (!url) {
-            showStatus('Please enter a YouTube URL.', 'error');
-            return;
-        }
+function renderQualityChips() {
+    qualityChips.innerHTML = '';
+    const currentQualities = qualities[selectedFormat];
 
-        // Basic YouTube URL regex validation clientside
-        const ytRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.?be)\/.+$/;
-        if (!ytRegex.test(url)) {
-            showStatus('Please enter a valid YouTube URL.', 'error');
-            return;
-        }
-
-        startDownload(url);
+    currentQualities.forEach((q, index) => {
+        const chip = document.createElement('div');
+        chip.className = `chip ${selectedQuality === q.value ? 'active' : ''}`;
+        chip.textContent = q.label;
+        chip.onclick = () => {
+            selectedQuality = q.value;
+            renderQualityChips();
+        };
+        qualityChips.appendChild(chip);
     });
 
-    function startDownload(url) {
-        // UI Loading State
-        downloadBtn.classList.add('is-loading');
-        downloadBtn.disabled = true;
-        urlInput.disabled = true;
-        hideStatus();
+    qualityLabel.textContent = selectedFormat === 'mp4' ? 'Resolution' : 'Bitrate';
+}
 
-        // The browser handles streaming file downloads via window.location directly
-        // point to the backend's download endpoint.
-        const encodedUrl = encodeURIComponent(url);
-        const downloadUrl = `/api/download?url=${encodedUrl}`;
+// Format toggle logic
+formatToggle.querySelectorAll('.toggle-btn').forEach(btn => {
+    btn.onclick = () => {
+        formatToggle.querySelector('.active').classList.remove('active');
+        btn.classList.add('active');
+        selectedFormat = btn.dataset.value;
+        // Default quality when switching
+        selectedQuality = selectedFormat === 'mp4' ? '720' : '192';
+        renderQualityChips();
+    };
+});
 
-        // Timeout to simulate processing and revert UI (actual download happens in the background via browser)
-        setTimeout(() => {
-            // Trigger native download
-            window.location.href = downloadUrl;
+// Initial render
+renderQualityChips();
 
-            // Revert UI State after a delay to show success
-            setTimeout(() => {
-                downloadBtn.classList.remove('is-loading');
-                downloadBtn.disabled = false;
-                urlInput.disabled = false;
-                urlInput.value = ''; // Clear input
-                showStatus('Download initiated! Check your browser downloads.', 'success');
-            }, 1000);
-
-        }, 800);
+downloadBtn.addEventListener('click', async () => {
+    const url = videoUrlInput.value.trim();
+    if (!url) {
+        showStatus('Please paste a YouTube URL', 'error');
+        return;
     }
 
-    function showStatus(message, type) {
-        statusMessage.textContent = message;
-        statusMessage.className = `status-message status-${type}`; // removes hidden
-    }
+    setLoading(true);
+    showStatus('Processing your request...', '');
 
-    function hideStatus() {
-        statusMessage.classList.add('hidden');
-        statusMessage.className = 'status-message hidden';
+    try {
+        const downloadUrl = `/api/download?url=${encodeURIComponent(url)}&format=${selectedFormat}&quality=${selectedQuality}`;
+
+        const response = await fetch(downloadUrl);
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(errorText || 'Download failed');
+        }
+
+        const contentDisposition = response.headers.get('Content-Disposition');
+        let fileName = `download.${selectedFormat}`;
+        if (contentDisposition) {
+            const match = contentDisposition.match(/filename="(.+)"/);
+            if (match) fileName = match[1];
+        }
+
+        const blob = await response.blob();
+        const downloadLink = document.createElement('a');
+        downloadLink.href = window.URL.createObjectURL(blob);
+        downloadLink.download = fileName;
+        document.body.appendChild(downloadLink);
+        downloadLink.click();
+        downloadLink.remove();
+
+        showStatus('Download started successfully!', 'success');
+    } catch (error) {
+        showStatus(error.message, 'error');
+    } finally {
+        setLoading(false);
     }
 });
+
+function showStatus(msg, type) {
+    statusMsg.textContent = msg;
+    statusMsg.className = `status-msg ${type}`;
+}
+
+function setLoading(isLoading) {
+    downloadBtn.disabled = isLoading;
+    spinner.classList.toggle('hidden', !isLoading);
+    btnText.textContent = isLoading ? 'Processing...' : 'Download Now';
+}
